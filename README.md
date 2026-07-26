@@ -6,7 +6,7 @@ A remote-controlled car built on the AI-Thinker ESP32-CAM: live video streaming 
 
 ## What it does
 
-On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans the networks on the air. It matches them and connects to the strongest known one. If no stored network is in range, it falls back to **Access Point mode**: it creates its own network (`ESP32_CAM_AFONSO`), and you send it credentials with a TCP tool like Packet Sender (`WIFI:ssid,password`). It saves them to flash and restarts, so the next boot connects normally.
+On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans the networks on the air. It matches them and connects to the strongest known one. If no stored network is in range, it falls back to **Access Point mode**: it creates its own network (`the AP name set in config.h`), and you send it credentials with a TCP tool like Packet Sender (`WIFI:ssid,password`). It saves them to flash and restarts, so the next boot connects normally.
 
 Once online, the car connects out to two Python servers running on the PC: one for control commands, one for the camera stream.
 
