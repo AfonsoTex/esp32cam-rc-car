@@ -2,7 +2,7 @@
 
 A remote-controlled car built on the AI-Thinker ESP32-CAM: live video streaming and gamepad control over WiFi, driven from a PC.
 
-![Assembled car](docs/assembled.jpg)
+![Assembled car](docs/assembled.jpeg)
 
 ## What it does
 
@@ -33,15 +33,15 @@ A heartbeat keeps the link alive: if commands go silent for 1 s the motors stop,
 
 ## Build
 
-![Printed chassis](docs/chassis.jpg)
+![Printed chassis](docs/chassis.jpeg)
 
 Printed chassis: battery holder, screw mounts for the protoboards, and mounts for the ESP32-CAM housing.
 
-![ESP housing, front](docs/esp-housing-cover.jpg)
+![ESP housing, front](docs/esp-housing-cover.jpeg)
 
 ESP32-CAM housing and cover (front).
 
-![ESP housing, back](docs/esp-housing-cover-back.jpg)
+![ESP housing, back](docs/esp-housing-cover-back.jpeg)
 
 Housing and cover (back).
 
