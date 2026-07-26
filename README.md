@@ -27,7 +27,7 @@ A heartbeat keeps the link alive: if commands go silent for 1 s the motors stop,
 ## Hardware
 
 - AI-Thinker ESP32-CAM (ESP32-S + OV2640)
-- L293D H-bridge (two DC motors)
+- 2 L293D H-bridge (four DC motors)
 - 3D-printed chassis (see `hardware/`)
 - 7.4 V LiPo battery + 5 V regulator
 
