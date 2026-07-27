@@ -2,11 +2,15 @@
 
 A remote-controlled car built on the AI-Thinker ESP32-CAM: live video streaming and gamepad control over WiFi, driven from a PC.
 
+## Watch the demo on YouTube
+
+[![Watch the demo on YouTube](docs/assembled-youtube.jpeg)](https://www.youtube.com/watch?v=0vkdqZmBMSo)
+
 ![Assembled car](docs/assembled.jpeg)
 
 ## What it does
 
-On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans the networks on the air. It matches them and connects to the strongest known one. If no stored network is in range, it falls back to **Access Point mode**: it creates its own network (`the AP name set in config.h`), and you send it credentials with a TCP tool like Packet Sender (`WIFI:ssid,password`). It saves them to flash and restarts, so the next boot connects normally.
+On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans the networks on the air. It matches them and connects to the strongest known one. If no stored network is in range, it falls back to **Access Point mode**: it creates its own network (the AP name set in `config.h`), and you send it credentials with a TCP tool like Packet Sender (`WIFI:ssid,password`). It saves them to flash and restarts, so the next boot connects normally.
 
 Once online, the car connects out to two Python servers running on the PC: one for control commands, one for the camera stream.
 
@@ -27,7 +31,7 @@ A heartbeat keeps the link alive: if commands go silent for 1 s the motors stop,
 ## Hardware
 
 - AI-Thinker ESP32-CAM (ESP32-S + OV2640)
-- 2 L293D H-bridge (four DC motors)
+- 2× L293D H-bridges (four DC motors, two per side)
 - 3D-printed chassis (see `hardware/`)
 - 7.4 V LiPo battery + 5 V regulator
 
@@ -44,10 +48,6 @@ ESP32-CAM housing and cover (front).
 ![ESP housing, back](docs/esp-housing-cover-back.jpeg)
 
 Housing and cover (back).
-
-![Test run](docs/test-video-link)
-
-*(demo video link)*
 
 ## How to use
 
