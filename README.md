@@ -2,11 +2,7 @@
 
 A remote-controlled car built on the AI-Thinker ESP32-CAM: live video streaming and gamepad control over WiFi, driven from a PC.
 
-## Watch the demo on YouTube
-
-[![Watch the demo on YouTube](docs/assembled-youtube.jpeg)](https://www.youtube.com/watch?v=0vkdqZmBMSo)
-
-![Assembled car](docs/assembled.jpeg)
+<div align="center"><img src="docs/assembled.jpeg" width="500"></div>
 
 ## What it does
 
@@ -37,17 +33,28 @@ A heartbeat keeps the link alive: if commands go silent for 1 s the motors stop,
 
 ## Build
 
-![Printed chassis](docs/chassis.jpeg)
+<div align="center">
+  <img src="docs/chassis.jpeg" width="400"><br>
+  <em>Printed chassis: battery holder, screw mounts for the protoboards, and mounts for the ESP32-CAM housing.</em>
+</div>
 
-Printed chassis: battery holder, screw mounts for the protoboards, and mounts for the ESP32-CAM housing.
+<br>
 
-![ESP housing, front](docs/esp-housing-cover.jpeg)
+<div align="center">
+  <img src="docs/esp-housing-cover.jpeg" width="400"><br>
+  <em>ESP32-CAM housing and cover (front).</em>
+</div>
 
-ESP32-CAM housing and cover (front).
+<br>
 
-![ESP housing, back](docs/esp-housing-cover-back.jpeg)
+<div align="center">
+  <img src="docs/esp-housing-cover-back.jpeg" width="400"><br>
+  <em>Housing and cover (back).</em>
+</div>
 
-Housing and cover (back).
+## Demo
+
+<div align="center"><a href="https://www.youtube.com/watch?v=0vkdqZmBMSo"><img src="docs/assembled-youtube.jpeg" width="500"></a></div>
 
 ## How to use
 
