@@ -85,16 +85,21 @@ const char *destino = DESTINO_IP;
 #define SERVER_PORT 1883
 #define VIDEO_PORT 1884
 #define HELLO_INTERVAL_MS 1000UL
+#define CONTROL_WATCHDOG_MS 500UL
 
-// Last time any data arrived from the PC. Silence for >1 s stops the
-// motors; >5 s drops the TCP connection.
+// Last data received on the temporary legacy TCP channel.
+// Motor safety is owned exclusively by the UDP watchdog.
 unsigned long lastHeartbeat = 0;
 unsigned long wifiLostTimestamp = 0;
 bool trackingLostWifi = false;
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastHelloSent = 0;
 ControlSequenceState udpControlSequenceState;
-unsigned long lastUdpShadowLog = 0;
+unsigned long lastUdpControlLog = 0;
+unsigned long lastValidUdpCommand = 0;
+bool udpCommandApplied = false;
+float lastAppliedUdpMove = 0.0F;
+float lastAppliedUdpDirection = 0.0F;
 IPAddress controlPeerIp;
 bool controlPeerIpValid = false;
 
@@ -411,7 +416,7 @@ void send_control_hello_if_due() {
     udpControl.endPacket();
 }
 
-void process_udp_control_packets_shadow() {
+void process_udp_control_packets() {
     int packet_size = 0;
 
     while ((packet_size = udpControl.parsePacket()) > 0) {
@@ -458,19 +463,45 @@ void process_udp_control_packets_shadow() {
         }
 
         const unsigned long now = millis();
-        if (now - lastUdpShadowLog >= 1000UL) {
+        lastValidUdpCommand = now;
+
+        if (
+            !udpCommandApplied
+            || command.move != lastAppliedUdpMove
+            || command.direction != lastAppliedUdpDirection
+        ) {
+            motor_logic(command.move, command.direction);
+            lastAppliedUdpMove = command.move;
+            lastAppliedUdpDirection = command.direction;
+            udpCommandApplied = true;
+        }
+
+        if (now - lastUdpControlLog >= 1000UL) {
             Serial.printf(
-                "[CONTROL][SHADOW] session=%lu seq=%lu move=%.2f dir=%.2f\n",
+                "[CONTROL][UDP] session=%lu seq=%lu move=%.2f dir=%.2f\n",
                 static_cast<unsigned long>(command.session),
                 static_cast<unsigned long>(command.sequence),
                 command.move,
                 command.direction
             );
-            lastUdpShadowLog = now;
+            lastUdpControlLog = now;
         }
-
-        // Shadow mode deliberately does not drive motors or refresh watchdogs.
     }
+}
+
+
+void enforce_udp_control_watchdog() {
+    if (!udpCommandApplied) {
+        return;
+    }
+
+    if (millis() - lastValidUdpCommand <= CONTROL_WATCHDOG_MS) {
+        return;
+    }
+
+    stop_motors();
+    udpCommandApplied = false;
+    Serial.println("[CONTROL][UDP] WATCHDOG TIMEOUT - motors stopped");
 }
 
 
@@ -640,14 +671,13 @@ void loop() {
 
     // Advertise this ESP32 even while the legacy TCP link is disconnected.
     send_control_hello_if_due();
-    process_udp_control_packets_shadow();
+    process_udp_control_packets();
+    enforce_udp_control_watchdog();
 
-    // Layer 2 — is the TCP link to the PC up?
-    // If down: stop the motors and retry connect once every 5 s (connect
-    // blocks while waiting, so calling it every loop would trap us here).
-    // Reset lastHeartbeat either way so the fresh link isn't seen as silent.
+    // Layer 2 - maintain the temporary legacy TCP link during migration.
+    // It is still used for Python synchronization and video gating,
+    // but it no longer owns motor commands or motor safety.
     if (!client.connected()) {
-        stop_motors();
         if (millis() - lastReconnectAttempt > 5000) {
             lastReconnectAttempt = millis();
             Serial.printf("[%lu] Trying to reach the PC...\n", millis());
@@ -662,18 +692,14 @@ void loop() {
         return;
     }
 
-    // Layer 3 — silence watchdog. PC sends HB every 0.2 s, so silence = trouble.
-    if (millis() - lastHeartbeat > 1000) {
-        stop_motors();                    // 1 s: safety stop
-    }
-
+    // Layer 3 - legacy TCP liveness only; UDP owns motor safety.
     if (millis() - lastHeartbeat > 5000) {
         Serial.printf("[%lu] HEARTBEAT TIMEOUT - closing!\n", millis());
         client.stop();                    // 5 s: assume dead, drop the socket
         lastReconnectAttempt = millis();
     }
 
-    // Layer 4 — read all pending lines; only MOV: lines drive the motors.
+    // Layer 4 - drain legacy TCP data only to track connection liveness.
     if (client.available() > 0) {
         while (client.available() > 0) {
             memset(buffer, 0, sizeof(buffer));
@@ -681,8 +707,6 @@ void loop() {
             lastHeartbeat = millis();
         }
 
-        if (strncmp(buffer, "MOV:", 4) == 0) {
-            processar_comando(buffer);
-        }
+        // Legacy TCP payloads are drained but never applied to motors.
     }
 }
