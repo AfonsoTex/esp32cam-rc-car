@@ -18,7 +18,7 @@ from control_protocol import (
 # NETWORK CONFIGURATION
 # ==========================================
 HOST = '0.0.0.0'      # listen on ANY of this PC's network interfaces (not just one)
-PORT_CONTROL = CONTROL_PORT  # TCP and UDP use separate transports on port 1883
+PORT_CONTROL = CONTROL_PORT  # UDP discovery and ESP32 control port
 PORT_VIDEO = 1884     # UDP port for the camera's JPEG frames
 # (IP picks the machine; the port picks which service on it — like building + apartment)
 
@@ -378,57 +378,63 @@ def image_processing_thread():
 # ==========================================
 def main():
     global autonomous_mode, auto_direction, auto_move
-    
-    # Start UDP discovery while the existing TCP control remains operational.
+
     t_discovery = threading.Thread(
         target=control_discovery_thread,
         daemon=True,
     )
     t_discovery.start()
 
-    # Inicia a Thread 1 (Receção de Vídeo)
     t_rx = threading.Thread(target=video_rx_thread, daemon=True)
     t_rx.start()
 
-    # Inicia a Thread 2 (Processamento de Imagem)
     t_proc = threading.Thread(target=image_processing_thread, daemon=True)
     t_proc.start()
 
     pygame.init()
     pygame.joystick.init()
-    joystick = None  # Placeholder for the gamepad/controller instance
+    joystick = None
 
-    # UDP shadow sender: TCP remains authoritative during migration.
     udp_control_sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     control_session = secrets.randbits(32) or 1
     control_sequence = 0
+    last_logged_state = None
+
     print(f"[{timestamp()}] UDP control session: {control_session}")
 
-    # Create a TCP/IP socket for control communication
-    server_control = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
-    # Allow immediate reuse of the port to prevent "Address already in use" errors on restart
-    server_control.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    # Bind the socket to the defined host and control port
-    server_control.bind((HOST, PORT_CONTROL))
-    
-    # Listen for incoming connection requests (maximum queue of 1)
-    server_control.listen(1)
-    
-    # Set a 2.0-second timeout on the server socket:
-    # 1. Without a timeout, server_control.accept() blocks execution indefinitely 
-    #    while waiting for a client connection, freezing the program.
-    # 2. With settimeout(2.0), if no client connects within 2 seconds, the method 
-    #    raises a timeout exception instead of locking the thread permanently, 
-    #    allowing the main loop to handle other events.
-    server_control.settimeout(2.0)
-    
-    print(f"[{timestamp()}] Control Server active on port {PORT_CONTROL}")
+    def advance_control_identity():
+        nonlocal control_session, control_sequence
+
+        if control_sequence < UINT32_MAX:
+            control_sequence += 1
+            return
+
+        previous_session = control_session
+        while control_session == previous_session:
+            control_session = secrets.randbits(32) or 1
+        control_sequence = 0
+
+        print(f"[{timestamp()}] UDP control session rotated: {control_session}")
+
+    def send_udp_state(address, move, direction):
+        payload = encode_control_command(
+            control_session,
+            control_sequence,
+            move,
+            direction,
+        )
+
+        try:
+            udp_control_sender.sendto(payload, address)
+        except OSError as error:
+            print(f"[{timestamp()}] UDP control send failed: {error}")
+            return False
+
+        advance_control_identity()
+        return True
 
     try:
         while True:
-            # Poll Pygame events to handle dynamic controller connection or disconnection
             for event in pygame.event.get():
                 if event.type == pygame.JOYDEVICEADDED:
                     if joystick is not None:
@@ -436,143 +442,103 @@ def main():
                     joystick = pygame.joystick.Joystick(event.device_index)
                     joystick.init()
                     print(f"[{timestamp()}] Controller connected!")
+
                 elif event.type == pygame.JOYDEVICEREMOVED:
                     if joystick is not None:
                         joystick.quit()
                         joystick = None
                         print(f"[{timestamp()}] Controller disconnected!")
 
-            # Wait for an incoming client connection with a 2-second timeout
-            try:
-                print(f"[{timestamp()}] Waiting for ESP32 on control port...")
-                conn, addr = server_control.accept()
-                print(f"[{timestamp()}] ESP32 Control connected: {addr}")
-            except socket.timeout:
-                continue
+                elif event.type == pygame.JOYBUTTONDOWN and event.button == 0:
+                    autonomous_mode = not autonomous_mode
+                    mode_name = "AUTOMATIC" if autonomous_mode else "MANUAL"
+                    print(
+                        f"\n>>> [{timestamp()}] "
+                        f"MODE CHANGED TO: {mode_name} <<<\n"
+                    )
 
-            previous_command = None
-            last_sent_time = time.time()
+            if autonomous_mode:
+                with state_lock:
+                    direction = auto_direction
+                    move_cmd = auto_move
 
-            # Active connection loop for handling game controller inputs
-            try:
-                while True:
-                    for event in pygame.event.get():
-                        # Toggle autonomous/manual mode when button 0 is pressed
-                        if event.type == pygame.JOYBUTTONDOWN and event.button == 0:
-                            autonomous_mode = not autonomous_mode
-                            mode_str = "AUTOMATIC" if autonomous_mode else "MANUAL"
-                            print(f"\n>>> [{timestamp()}] MODE CHANGED TO: {mode_str} <<<\n")
+                if move_cmd < 0:
+                    move = move_cmd
+                else:
+                    abs_dir = abs(direction)
 
-                    if autonomous_mode:
-                        # --------------------------------------------------
-                        # AUTONOMOUS MODE CONTROL
-                        # --------------------------------------------------
-                        # Retrieve current direction and move commands safely from shared threads using the state lock
-                        with state_lock:
-                            direction = auto_direction
-                            move_cmd = auto_move
-
-                        # Check if the robot is reversing (negative move command)
-                        if move_cmd < 0:
-                            # 1. If negative, maintain reverse movement speed
-                            move = move_cmd
-                        else:
-                            # 2. Calculate dynamic curve acceleration only when moving FORWARD
-                            abs_dir = abs(direction)
-                            
-                            # If the steering deviation exceeds the defined curve threshold, scale the speed up
-                            if abs_dir > CURVE_THRESHOLD:
-                                strength_factor = (abs_dir - CURVE_THRESHOLD) / (1.0 - CURVE_THRESHOLD)
-                                move = BASE_SPEED + strength_factor * (MAX_CURVE_SPEED - BASE_SPEED)
-                            else:
-                                # Otherwise, maintain standard baseline cruising speed
-                                move = BASE_SPEED
-                    else:
-                        # --------------------------------------------------
-                        # MANUAL MODE CONTROL (GAMEPAD / JOYSTICK)
-                        # --------------------------------------------------
-                        if joystick is not None:
-                            pygame.event.pump()  # Refresh internal joystick states
-                            
-                            # Read raw axes from the gamepad (Axis 0 for steering, Axes 5 and 4 for triggers)
-                            dir_joy = joystick.get_axis(0)
-                            accelerate = joystick.get_axis(5)
-                            brake = joystick.get_axis(4)
-
-                            # Normalize trigger inputs to standard ranges
-                            accelerate_norm = normalize(accelerate)
-                            brake_norm = normalize(brake)
-
-                            # Apply deadzone filtering to eliminate minor joystick centering jitter
-                            if abs(dir_joy) < 0.1:
-                                dir_joy = 0.0
-
-                            # Calculate movement as the net difference between acceleration and braking triggers
-                            move = accelerate_norm - brake_norm
-                            direction = dir_joy
-                        else:
-                            # Fallback state if manual mode is active but no controller is physically connected
-                            move = 0.0
-                            direction = 0.0
-
-                    # Format the final telemetry command string to send to the robot over TCP
-                    command = f"MOV:{move:.2f},DIR:{direction:.2f}\n"
-
-                    # Send the complete current state on every 50 ms cycle.
-                    with control_address_lock:
-                        udp_address = esp32_control_address
-
-                    if udp_address is not None:
-                        udp_payload = encode_control_command(
-                            control_session,
-                            control_sequence,
-                            move,
-                            direction,
+                    if abs_dir > CURVE_THRESHOLD:
+                        strength_factor = (
+                            (abs_dir - CURVE_THRESHOLD)
+                            / (1.0 - CURVE_THRESHOLD)
                         )
+                        move = (
+                            BASE_SPEED
+                            + strength_factor
+                            * (MAX_CURVE_SPEED - BASE_SPEED)
+                        )
+                    else:
+                        move = BASE_SPEED
+            else:
+                if joystick is not None:
+                    pygame.event.pump()
 
-                        try:
-                            udp_control_sender.sendto(udp_payload, udp_address)
-                        except OSError as error:
-                            print(f"[{timestamp()}] UDP control send failed: {error}")
-                        else:
-                            if control_sequence == UINT32_MAX:
-                                next_session = control_session
-                                while next_session == control_session:
-                                    next_session = secrets.randbits(32) or 1
-                                control_session = next_session
-                                control_sequence = 0
-                            else:
-                                control_sequence += 1
+                    dir_joy = joystick.get_axis(0)
+                    accelerate = joystick.get_axis(5)
+                    brake = joystick.get_axis(4)
 
-                    try:
-                        # Send command only if it changes or if a heartbeat interval has passed
-                        if command != previous_command:
-                            print(f"[{'AUTO' if autonomous_mode else 'MANUAL'}] Sending: {command.strip()}")
-                            conn.send(command.encode())
-                            previous_command = command
-                            last_sent_time = time.time()
+                    accelerate_norm = normalize(accelerate)
+                    brake_norm = normalize(brake)
 
-                        elif time.time() - last_sent_time > 0.2:
-                            # Send a heartbeat packet if no movement command changed for over 200ms
-                            conn.send(b'HB\n')
-                            last_sent_time = time.time()
+                    if abs(dir_joy) < 0.1:
+                        dir_joy = 0.0
 
-                    except OSError as e:
-                        print(f"[{timestamp()}] Control connection lost: {e}")
-                        break
+                    move = accelerate_norm - brake_norm
+                    direction = dir_joy
+                else:
+                    move = 0.0
+                    direction = 0.0
 
-                    time.sleep(0.05)
+            state_to_log = (
+                "AUTO" if autonomous_mode else "MANUAL",
+                round(move, 2),
+                round(direction, 2),
+            )
+            if state_to_log != last_logged_state:
+                print(
+                    f"[{state_to_log[0]}] Current state: "
+                    f"MOV:{state_to_log[1]:.2f},"
+                    f"DIR:{state_to_log[2]:.2f}"
+                )
+                last_logged_state = state_to_log
 
-            finally:
-                conn.close()
+            with control_address_lock:
+                udp_address = esp32_control_address
+
+            if udp_address is not None:
+                send_udp_state(udp_address, move, direction)
+
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
         print("\nServer shutting down...")
+
     finally:
-        server_control.close()
+        with control_address_lock:
+            udp_address = esp32_control_address
+
+        if udp_address is not None:
+            for _ in range(3):
+                send_udp_state(udp_address, 0.0, 0.0)
+                time.sleep(0.02)
+
+        if joystick is not None:
+            joystick.quit()
+
         udp_control_sender.close()
         pygame.quit()
         print("Resources released")
+
 
 if __name__ == "__main__":
     main()
