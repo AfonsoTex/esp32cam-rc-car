@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-constexpr size_t VIDEO_HEADER_SIZE = 16;
+constexpr size_t VIDEO_HEADER_SIZE = 20;
 constexpr size_t VIDEO_DATAGRAM_MAX_SIZE = 1200;
 constexpr size_t VIDEO_FRAGMENT_PAYLOAD_SIZE =
     VIDEO_DATAGRAM_MAX_SIZE - VIDEO_HEADER_SIZE;
@@ -49,6 +49,7 @@ inline void video_write_uint32_be(
 inline bool encode_video_header(
     uint8_t *output,
     size_t output_size,
+    uint32_t session_id,
     uint32_t frame_id,
     uint16_t fragment_index,
     uint16_t fragment_count,
@@ -62,7 +63,8 @@ inline bool encode_video_header(
         video_fragment_count(frame_size);
 
     if (
-        expected_count == 0
+        session_id == 0
+        || expected_count == 0
         || fragment_count != expected_count
         || fragment_index >= fragment_count
     ) {
@@ -74,10 +76,11 @@ inline bool encode_video_header(
     output[2] = VIDEO_MAGIC[2];
     output[3] = VIDEO_MAGIC[3];
 
-    video_write_uint32_be(output + 4, frame_id);
-    video_write_uint16_be(output + 8, fragment_index);
-    video_write_uint16_be(output + 10, fragment_count);
-    video_write_uint32_be(output + 12, frame_size);
+    video_write_uint32_be(output + 4, session_id);
+    video_write_uint32_be(output + 8, frame_id);
+    video_write_uint16_be(output + 12, fragment_index);
+    video_write_uint16_be(output + 14, fragment_count);
+    video_write_uint32_be(output + 16, frame_size);
 
     return true;
 }

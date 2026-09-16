@@ -5,7 +5,7 @@ import struct
 import time
 
 VIDEO_MAGIC = b"VFR1"
-VIDEO_HEADER = struct.Struct("!4sIHHI")
+VIDEO_HEADER = struct.Struct("!4sIIHHI")
 
 VIDEO_HEADER_SIZE = VIDEO_HEADER.size
 VIDEO_DATAGRAM_MAX_SIZE = 1200
@@ -24,7 +24,18 @@ def fragment_count_for_size(frame_size):
     return math.ceil(frame_size / VIDEO_FRAGMENT_PAYLOAD_SIZE)
 
 
-def encode_video_fragment(frame_id, fragment_index, frame):
+def encode_video_fragment(
+    frame_id,
+    fragment_index,
+    frame,
+    session_id=1,
+):
+    if (
+        not isinstance(session_id, int)
+        or not 1 <= session_id <= UINT32_MAX
+    ):
+        raise ValueError("session_id must be a non-zero uint32")
+
     if not isinstance(frame_id, int) or not 0 <= frame_id <= UINT32_MAX:
         raise ValueError("frame_id must be an unsigned 32-bit integer")
 
@@ -44,6 +55,7 @@ def encode_video_fragment(frame_id, fragment_index, frame):
 
     header = VIDEO_HEADER.pack(
         VIDEO_MAGIC,
+        session_id,
         frame_id,
         fragment_index,
         fragment_count,
@@ -60,11 +72,16 @@ def parse_video_fragment(datagram):
     if not VIDEO_HEADER_SIZE < len(datagram) <= VIDEO_DATAGRAM_MAX_SIZE:
         return None
 
-    magic, frame_id, fragment_index, fragment_count, frame_size = (
-        VIDEO_HEADER.unpack_from(datagram)
-    )
+    (
+        magic,
+        session_id,
+        frame_id,
+        fragment_index,
+        fragment_count,
+        frame_size,
+    ) = VIDEO_HEADER.unpack_from(datagram)
 
-    if magic != VIDEO_MAGIC:
+    if magic != VIDEO_MAGIC or session_id == 0:
         return None
 
     if frame_size <= 0 or frame_size > VIDEO_FRAME_MAX_SIZE:
@@ -91,6 +108,7 @@ def parse_video_fragment(datagram):
         return None
 
     return (
+        session_id,
         frame_id,
         fragment_index,
         fragment_count,
@@ -107,6 +125,8 @@ class VideoFrameAssembler:
             raise ValueError("timeout_seconds must be positive")
 
         self.timeout_seconds = timeout_seconds
+        self.latest_session_id = None
+        self.retired_sessions = []
         self.latest_frame_id = None
         self.active_frame_id = None
         self.fragment_count = 0
@@ -156,12 +176,27 @@ class VideoFrameAssembler:
             self._clear_active_frame()
 
         (
+            session_id,
             frame_id,
             fragment_index,
             fragment_count,
             frame_size,
             payload,
         ) = parsed
+
+        if session_id != self.latest_session_id:
+            if session_id in self.retired_sessions:
+                return None
+
+            if self.latest_session_id is not None:
+                self.retired_sessions.append(
+                    self.latest_session_id
+                )
+                self.retired_sessions = self.retired_sessions[-4:]
+
+            self._clear_active_frame()
+            self.latest_session_id = session_id
+            self.latest_frame_id = None
 
         if self.active_frame_id is None:
             if (

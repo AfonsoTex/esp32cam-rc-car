@@ -16,9 +16,9 @@ from video_protocol import (
 
 class VideoProtocolTests(unittest.TestCase):
     def test_protocol_sizes_are_safe_for_udp(self):
-        self.assertEqual(VIDEO_HEADER_SIZE, 16)
+        self.assertEqual(VIDEO_HEADER_SIZE, 20)
         self.assertEqual(VIDEO_DATAGRAM_MAX_SIZE, 1200)
-        self.assertEqual(VIDEO_FRAGMENT_PAYLOAD_SIZE, 1184)
+        self.assertEqual(VIDEO_FRAGMENT_PAYLOAD_SIZE, 1180)
 
     def test_single_fragment_round_trip(self):
         frame = b"jpeg-data"
@@ -28,7 +28,7 @@ class VideoProtocolTests(unittest.TestCase):
 
         self.assertEqual(
             parsed,
-            (42, 0, 1, len(frame), frame),
+            (1, 42, 0, 1, len(frame), frame),
         )
 
     def test_large_frame_is_split_into_expected_fragments(self):
@@ -44,10 +44,10 @@ class VideoProtocolTests(unittest.TestCase):
 
         self.assertEqual(len(datagrams[0]), 1200)
         self.assertEqual(len(datagrams[1]), 1200)
-        self.assertEqual(len(datagrams[2]), 148)
+        self.assertEqual(len(datagrams[2]), 160)
 
         rebuilt = b"".join(
-            parse_video_fragment(datagram)[4]
+            parse_video_fragment(datagram)[5]
             for datagram in datagrams
         )
 
@@ -70,6 +70,7 @@ class VideoProtocolTests(unittest.TestCase):
         wrong_count = (
             VIDEO_HEADER.pack(
                 VIDEO_MAGIC,
+                1,
                 5,
                 0,
                 2,

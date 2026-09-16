@@ -94,5 +94,40 @@ class VideoFrameAssemblerTests(unittest.TestCase):
         )
 
 
+    def test_new_session_accepts_restarted_frame_ids(self):
+        assembler = VideoFrameAssembler()
+
+        old = encode_video_fragment(
+            900,
+            0,
+            b"old",
+            session_id=10,
+        )
+        restarted = encode_video_fragment(
+            0,
+            0,
+            b"new",
+            session_id=11,
+        )
+        delayed_old = encode_video_fragment(
+            901,
+            0,
+            b"delayed",
+            session_id=10,
+        )
+
+        self.assertEqual(
+            assembler.add_datagram(old),
+            (900, b"old"),
+        )
+        self.assertEqual(
+            assembler.add_datagram(restarted),
+            (0, b"new"),
+        )
+        self.assertIsNone(
+            assembler.add_datagram(delayed_old)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

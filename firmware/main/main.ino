@@ -1,6 +1,7 @@
 #include "config.h"
 #include "control_protocol.h"
 #include "video_protocol.h"
+#include "esp_system.h"
 #include <WiFiUdp.h>
 #include <stdio.h>        // printf / sprintf
 #include "nvs_flash.h"    // NVS partition init (non-volatile storage in flash)
@@ -333,6 +334,7 @@ void motor_logic(float speed, float steering) {
 
 bool send_video_frame_fragmented(
     const camera_fb_t *frame,
+    uint32_t video_session_id,
     uint32_t frame_id
 ) {
     if (
@@ -372,6 +374,7 @@ bool send_video_frame_fragmented(
             !encode_video_header(
                 header,
                 sizeof(header),
+                video_session_id,
                 frame_id,
                 fragment_index,
                 fragment_count,
@@ -410,8 +413,17 @@ bool send_video_frame_fragmented(
 void task_camara(void *parameter) {
     udpVideo.begin(VIDEO_PORT);
 
+    uint32_t video_session_id = esp_random();
+    if (video_session_id == 0) {
+        video_session_id = 1;
+    }
     uint32_t next_frame_id = 0;
     unsigned long last_error_log = 0;
+
+    Serial.printf(
+        "[VIDEO] UDP session=%lu\n",
+        static_cast<unsigned long>(video_session_id)
+    );
 
     while (true) {
         if (!udpCommandApplied) {
@@ -430,6 +442,7 @@ void task_camara(void *parameter) {
         const uint32_t frame_id = next_frame_id++;
         const bool sent = send_video_frame_fragmented(
             frame,
+            video_session_id,
             frame_id
         );
 
