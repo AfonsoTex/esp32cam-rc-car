@@ -6,11 +6,13 @@ import time
 import datetime
 import threading    
 
+from control_protocol import CONTROL_PORT, resolve_esp32_address
+
 # ==========================================
 # NETWORK CONFIGURATION
 # ==========================================
 HOST = '0.0.0.0'      # listen on ANY of this PC's network interfaces (not just one)
-PORT_CONTROL = 1883   # TCP port for control: MOV/DIR commands and heartbeat
+PORT_CONTROL = CONTROL_PORT  # TCP and UDP use separate transports on port 1883
 PORT_VIDEO = 1884     # UDP port for the camera's JPEG frames
 # (IP picks the machine; the port picks which service on it — like building + apartment)
 
@@ -68,6 +70,41 @@ auto_move = 0.0          # speed the vision commands (-1..1); negative = reverse
 latest_frame = None            # holds ONLY the most recent captured frame
 frame_lock = threading.Lock()
 state_lock = threading.Lock()
+esp32_control_address = None
+control_address_lock = threading.Lock()
+
+
+def control_discovery_thread():
+    """Discover the ESP32 from valid UDP HELLO packets."""
+    global esp32_control_address
+
+    discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    discovery_socket.bind((HOST, PORT_CONTROL))
+
+    print(f"Waiting for ESP32 HELLO on UDP port {PORT_CONTROL}...")
+
+    while True:
+        try:
+            payload, sender = discovery_socket.recvfrom(256)
+        except OSError as error:
+            print(f"[{timestamp()}] UDP discovery error: {error}")
+            continue
+
+        address = resolve_esp32_address(payload, sender)
+        if address is None:
+            continue
+
+        with control_address_lock:
+            address_changed = address != esp32_control_address
+            esp32_control_address = address
+
+        if address_changed:
+            print(
+                f"[{timestamp()}] ESP32 discovered by UDP HELLO: "
+                f"{esp32_control_address}"
+            )
+
 
 
 def timestamp():
@@ -336,6 +373,13 @@ def image_processing_thread():
 def main():
     global autonomous_mode, auto_direction, auto_move
     
+    # Start UDP discovery while the existing TCP control remains operational.
+    t_discovery = threading.Thread(
+        target=control_discovery_thread,
+        daemon=True,
+    )
+    t_discovery.start()
+
     # Inicia a Thread 1 (Receção de Vídeo)
     t_rx = threading.Thread(target=video_rx_thread, daemon=True)
     t_rx.start()
