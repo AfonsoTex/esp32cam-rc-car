@@ -93,6 +93,8 @@ unsigned long wifiLostTimestamp = 0;
 bool trackingLostWifi = false;
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastHelloSent = 0;
+ControlSequenceState udpControlSequenceState;
+unsigned long lastUdpShadowLog = 0;
 
 // TCP server, used ONLY in Access Point mode (initial WiFi setup).
 // With no known network, the ESP32 becomes the AP "ESP32_CAM_AFONSO".
@@ -407,6 +409,62 @@ void send_control_hello_if_due() {
     udpControl.endPacket();
 }
 
+void process_udp_control_packets_shadow() {
+    int packet_size = 0;
+
+    while ((packet_size = udpControl.parsePacket()) > 0) {
+        if (packet_size > static_cast<int>(CONTROL_PACKET_MAX_SIZE)) {
+            while (udpControl.available() > 0) {
+                udpControl.read();
+            }
+            continue;
+        }
+
+        uint8_t packet[CONTROL_PACKET_MAX_SIZE];
+        const int bytes_read = udpControl.read(
+            packet,
+            static_cast<size_t>(packet_size)
+        );
+
+        if (bytes_read != packet_size) {
+            while (udpControl.available() > 0) {
+                udpControl.read();
+            }
+            continue;
+        }
+
+        ControlCommand command{};
+        const ControlParseResult parse_result = parse_control_command(
+            packet,
+            static_cast<size_t>(bytes_read),
+            command
+        );
+
+        if (parse_result != ControlParseResult::OK) {
+            continue;
+        }
+
+        if (!accept_control_sequence(command, udpControlSequenceState)) {
+            continue;
+        }
+
+        const unsigned long now = millis();
+        if (now - lastUdpShadowLog >= 1000UL) {
+            Serial.printf(
+                "[CONTROL][SHADOW] session=%lu seq=%lu move=%.2f dir=%.2f\n",
+                static_cast<unsigned long>(command.session),
+                static_cast<unsigned long>(command.sequence),
+                command.move,
+                command.direction
+            );
+            lastUdpShadowLog = now;
+        }
+
+        // Shadow mode deliberately does not drive motors or refresh watchdogs.
+    }
+}
+
+
 void setup() {
     Serial.begin(115200);
     pinos_setup();          // motor direction pins
@@ -568,6 +626,7 @@ void loop() {
 
     // Advertise this ESP32 even while the legacy TCP link is disconnected.
     send_control_hello_if_due();
+    process_udp_control_packets_shadow();
 
     // Layer 2 — is the TCP link to the PC up?
     // If down: stop the motors and retry connect once every 5 s (connect
