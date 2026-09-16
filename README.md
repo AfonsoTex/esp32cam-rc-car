@@ -19,7 +19,7 @@ The ESP32 captures camera frames, receives validated control commands, and drive
 
 **ESP32:**
 
-- Core 0 sends JPEG camera frames to the PC over UDP port `1884`.
+- Core 0 splits each JPEG into UDP datagrams of at most `1200` bytes and sends them to the PC on port `1884`.
 - Core 1 receives motor commands over UDP port `1883`.
 - TCP port `1883` remains available only in Access Point configuration mode for receiving WiFi credentials.
 
@@ -40,7 +40,7 @@ If no valid command arrives for `500 ms`, the ESP32 stops the motors. Losing WiF
 
 Source-IP filtering is not cryptographic authentication. The control channel is intended for a trusted local network.
 
-**Video limitation:** a complete JPEG is still sent as one UDP datagram. Large frames may be fragmented by IP, so application-level video fragmentation remains separate work.
+**Video framing:** every datagram carries a versioned `VFR1` header with a video session, frame ID, fragment index, fragment count and total JPEG size. The PC accepts out-of-order fragments and discards incomplete or obsolete frames.
 
 ## Line following
 
@@ -143,7 +143,7 @@ The line follower is **not plug-and-play**. The parameters in `server/unified_py
 
 ## Known limitations
 
-- **UDP video framing.** A JPEG is currently sent as one large UDP datagram. IP fragmentation makes large frames fragile; application-level fragmentation still needs to be implemented.
+- **UDP packet loss.** Video datagrams are not retransmitted. If any fragment is lost, the incomplete frame is discarded so processing can continue with a newer frame.
 - **No cryptographic control authentication.** Commands are restricted to `DESTINO_IP`, but source-IP filtering alone does not protect against a capable attacker on the local network.
 - **Turning radius.** The car uses differential drive with shared direction pins, so it cannot pivot in place.
 - **WiFi range.** The ESP32-CAM's on-board antenna is weak. An external antenna can improve its range.
@@ -153,7 +153,8 @@ The line follower is **not plug-and-play**. The parameters in `server/unified_py
 
 ```text
 firmware/main/                   ESP32 firmware and UDP protocol parser
-server/control_protocol.py      Python UDP protocol encoder
+server/control_protocol.py      Python UDP control protocol
+server/video_protocol.py        UDP video framing and reassembly
 server/unified_python_server - UDP.py
                                 Video, control and line-following server
 tests/                          Python and host-side C++ tests
