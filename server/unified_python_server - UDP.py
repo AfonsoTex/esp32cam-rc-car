@@ -13,6 +13,10 @@ from control_protocol import (
     encode_control_command,
     resolve_esp32_address,
 )
+from video_protocol import (
+    VIDEO_DATAGRAM_MAX_SIZE,
+    VideoFrameAssembler,
+)
 
 # ==========================================
 # NETWORK CONFIGURATION
@@ -127,68 +131,78 @@ def normalize(value):
 
 
 def video_rx_thread():
-    global latest_frame  #otherwise creates local variables; we need global for thread communication
+    global latest_frame
 
-    server_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # Added: Creates a UDP socket to receive the camera's video stream
-    server_video.bind(('0.0.0.0', 1884))                             # Added: Binds the socket to all local interfaces on port 1884
-    
-    print("Waiting for video on UDP port 1884 (Accumulation Mode)...")
-    
-    frame_buffer = bytearray()
-    # Used to accumulate binary packets received from the network until a complete JPEG file is reconstructed. 
-    # The code monitors incoming data in the buffer looking for JPEG start and end markers. 
-    
+    server_video = socket.socket(
+        socket.AF_INET,
+        socket.SOCK_DGRAM,
+    )
+    server_video.setsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_REUSEADDR,
+        1,
+    )
+    server_video.bind((HOST, PORT_VIDEO))
+
+    assembler = VideoFrameAssembler(timeout_seconds=0.5)
+
+    print(
+        f"Waiting for fragmented video on UDP port "
+        f"{PORT_VIDEO}..."
+    )
+
     while True:
-        try:  # Prevents the thread from crashing if a network error or data glitch occurs
+        try:
+            datagram, sender = server_video.recvfrom(
+                VIDEO_DATAGRAM_MAX_SIZE + 1
+            )
 
-            data, addr = server_video.recvfrom(65535)  # Receives up to 65535 bytes of binary data and the sender's address from the UDP socket
-            
-            if not data:
+            with control_address_lock:
+                control_address = esp32_control_address
+
+            if (
+                control_address is None
+                or sender[0] != control_address[0]
+            ):
                 continue
-            
-            # Checks if it is the start of a JPEG frame (Universal FF D8 markers for JPEG images)
-            if data[0] == 0xFF and data[1] == 0xD8:
-                frame_buffer = bytearray(data)  # When the start marker is detected, it means a new frame has begun transmitting. 
-                                                #The code discards any previous junk data and reinitializes the frame_buffer with 
-                                                #the data from this new packet.
-            else:
-                frame_buffer.extend(data)  # Executes if the first two bytes of 
-                                           #the packet do not match the FF D8 marker. 
-                                           #This means the current packet is a continuation (middle or end) of the video 
-                                           #frame currently being received.
-            
-            # This packet ends a JPEG frame if its last two bytes are FF D9 (EOI).
-            # len(data) >= 2 guards against a 1-byte packet where data[-2] would fail.
-            if len(data) >= 2 and data[-2] == 0xFF and data[-1] == 0xD9:
 
-                # Reinterpret the accumulated bytes as a NumPy array (no copy),
-                # then decompress the JPEG into a pixel image.
-                img_array = np.frombuffer(frame_buffer, dtype=np.uint8)
-                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            completed = assembler.add_datagram(datagram)
 
-                # None means the JPEG was corrupt (e.g. a lost UDP packet) — skip it.
-                if frame is not None:
+            if completed is None:
+                continue
 
-                # Hand the frame to the processing thread, under the lock.
-                # Safely passes a deep copy of the frame to the processing thread. 
-                # Without .copy(), both threads would share the exact same memory reference, 
-                # causing data corruption if the video thread overwrites the frame while the 
-                # processing thread is reading it.
-                    with frame_lock:
-                        latest_frame = frame.copy()
-                    #the processing thread will handle the display
+            frame_id, jpeg = completed
 
-                # New bytearray, not .clear(): NumPy above points at these same
-                # bytes. .clear() would wipe the bytes NumPy still needs (garbage).
-                # Reassigning leaves the old buffer intact for NumPy and starts a
-                # fresh one here — the old one lives on until NumPy is done with it.
-                frame_buffer = bytearray()
+            if (
+                not jpeg.startswith(b"\xff\xd8")
+                or not jpeg.endswith(b"\xff\xd9")
+            ):
+                continue
 
-        except Exception as e:
-            print(f"Video receive error: {e}")
-            break
+            image_data = np.frombuffer(jpeg, dtype=np.uint8)
+            frame = cv2.imdecode(
+                image_data,
+                cv2.IMREAD_COLOR,
+            )
 
-    server_video.close()
+            if frame is None:
+                print(
+                    f"[{timestamp()}] Video frame "
+                    f"{frame_id} could not be decoded"
+                )
+                continue
+
+            with frame_lock:
+                latest_frame = frame.copy()
+
+        except OSError as error:
+            print(f"[{timestamp()}] Video socket error: {error}")
+            continue
+
+        except Exception as error:
+            print(f"[{timestamp()}] Video receive error: {error}")
+            continue
+
 
 # ==========================================
 # THREAD 2: OPENCV PROCESSING
