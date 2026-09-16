@@ -1,5 +1,6 @@
 #include "config.h"
 #include "control_protocol.h"
+#include "video_protocol.h"
 #include <WiFiUdp.h>
 #include <stdio.h>        // printf / sprintf
 #include "nvs_flash.h"    // NVS partition init (non-volatile storage in flash)
@@ -330,40 +331,121 @@ void motor_logic(float speed, float steering) {
 }
 */
 
+bool send_video_frame_fragmented(
+    const camera_fb_t *frame,
+    uint32_t frame_id
+) {
+    if (
+        frame == nullptr
+        || frame->len == 0
+        || frame->len > VIDEO_FRAME_MAX_SIZE
+    ) {
+        return false;
+    }
+
+    const uint32_t frame_size =
+        static_cast<uint32_t>(frame->len);
+    const uint16_t fragment_count =
+        video_fragment_count(frame_size);
+
+    if (fragment_count == 0) {
+        return false;
+    }
+
+    uint8_t header[VIDEO_HEADER_SIZE];
+
+    for (
+        uint16_t fragment_index = 0;
+        fragment_index < fragment_count;
+        ++fragment_index
+    ) {
+        const size_t offset =
+            static_cast<size_t>(fragment_index)
+            * VIDEO_FRAGMENT_PAYLOAD_SIZE;
+        const size_t remaining = frame->len - offset;
+        const size_t payload_size =
+            remaining < VIDEO_FRAGMENT_PAYLOAD_SIZE
+            ? remaining
+            : VIDEO_FRAGMENT_PAYLOAD_SIZE;
+
+        if (
+            !encode_video_header(
+                header,
+                sizeof(header),
+                frame_id,
+                fragment_index,
+                fragment_count,
+                frame_size
+            )
+        ) {
+            return false;
+        }
+
+        if (udpVideo.beginPacket(destino, VIDEO_PORT) == 0) {
+            return false;
+        }
+
+        const bool write_succeeded =
+            udpVideo.write(header, sizeof(header))
+                == sizeof(header)
+            && udpVideo.write(
+                frame->buf + offset,
+                payload_size
+            ) == payload_size;
+
+        const bool send_succeeded =
+            udpVideo.endPacket() == 1;
+
+        if (!write_succeeded || !send_succeeded) {
+            return false;
+        }
+
+        taskYIELD();
+    }
+
+    return true;
+}
+
+
 void task_camara(void *parameter) {
-    // Initializes the UDP socket on the specified port to start sending camera frames
     udpVideo.begin(VIDEO_PORT);
 
+    uint32_t next_frame_id = 0;
+    unsigned long last_error_log = 0;
+
     while (true) {
-        // Stream video only while valid UDP control commands are recent.
-        // The watchdog clears this flag when control traffic stops.
         if (!udpCommandApplied) {
             vTaskDelay(100 / portTICK_PERIOD_MS);
             continue;
         }
 
-        // Capture a frame from the OV2640 camera sensor
-        camera_fb_t *fb = esp_camera_fb_get();
-    
-        // Check if the frame was successfully captured
-        if (fb != NULL) {
-            // Begin building a UDP packet targeted at the destination IP and video port
-            udpVideo.beginPacket(destino, VIDEO_PORT);
-            
-            // Write the raw JPEG buffer data into the UDP packet stream
-            udpVideo.write(fb->buf, fb->len);
-            
-            // Send the completed UDP packet across the network
-            udpVideo.endPacket();
-            
-            // Return the frame buffer to the driver pool so memory can be reused
-            esp_camera_fb_return(fb);
+        camera_fb_t *frame = esp_camera_fb_get();
+
+        if (frame == nullptr) {
+            Serial.println("[VIDEO] Frame capture failed");
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            continue;
         }
-        
-        // Delay task execution to maintain a target rate of approximately 30 frames per second
-        vTaskDelay(33 / portTICK_PERIOD_MS); 
+
+        const uint32_t frame_id = next_frame_id++;
+        const bool sent = send_video_frame_fragmented(
+            frame,
+            frame_id
+        );
+
+        esp_camera_fb_return(frame);
+
+        if (!sent && millis() - last_error_log >= 1000UL) {
+            Serial.println(
+                "[VIDEO] Fragmented frame send failed"
+            );
+            last_error_log = millis();
+        }
+
+        vTaskDelay(33 / portTICK_PERIOD_MS);
     }
 }
+
 
 void send_control_hello_if_due() {
     unsigned long now = millis();
