@@ -1,4 +1,5 @@
 import socket
+import secrets
 import cv2
 import numpy as np
 import pygame
@@ -6,7 +7,12 @@ import time
 import datetime
 import threading    
 
-from control_protocol import CONTROL_PORT, resolve_esp32_address
+from control_protocol import (
+    CONTROL_PORT,
+    UINT32_MAX,
+    encode_control_command,
+    resolve_esp32_address,
+)
 
 # ==========================================
 # NETWORK CONFIGURATION
@@ -392,6 +398,12 @@ def main():
     pygame.joystick.init()
     joystick = None  # Placeholder for the gamepad/controller instance
 
+    # UDP shadow sender: TCP remains authoritative during migration.
+    udp_control_sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    control_session = secrets.randbits(32) or 1
+    control_sequence = 0
+    print(f"[{timestamp()}] UDP control session: {control_session}")
+
     # Create a TCP/IP socket for control communication
     server_control = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     
@@ -506,6 +518,32 @@ def main():
                     # Format the final telemetry command string to send to the robot over TCP
                     command = f"MOV:{move:.2f},DIR:{direction:.2f}\n"
 
+                    # Send the complete current state on every 50 ms cycle.
+                    with control_address_lock:
+                        udp_address = esp32_control_address
+
+                    if udp_address is not None:
+                        udp_payload = encode_control_command(
+                            control_session,
+                            control_sequence,
+                            move,
+                            direction,
+                        )
+
+                        try:
+                            udp_control_sender.sendto(udp_payload, udp_address)
+                        except OSError as error:
+                            print(f"[{timestamp()}] UDP control send failed: {error}")
+                        else:
+                            if control_sequence == UINT32_MAX:
+                                next_session = control_session
+                                while next_session == control_session:
+                                    next_session = secrets.randbits(32) or 1
+                                control_session = next_session
+                                control_sequence = 0
+                            else:
+                                control_sequence += 1
+
                     try:
                         # Send command only if it changes or if a heartbeat interval has passed
                         if command != previous_command:
@@ -532,6 +570,7 @@ def main():
         print("\nServer shutting down...")
     finally:
         server_control.close()
+        udp_control_sender.close()
         pygame.quit()
         print("Resources released")
 
