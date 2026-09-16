@@ -15,20 +15,32 @@ On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans t
 
 ## Architecture
 
-The ESP32 stays "dumb" on purpose: it captures and sends frames, receives commands, and drives the motors. All the thinking happens on the PC.
+The ESP32 captures camera frames, receives validated control commands, and drives the motors. The PC handles the gamepad and computer-vision decisions.
 
-**On the ESP32 (two cores, so heavy video never blocks driving):**
-- **Core 0** captures JPEG frames from the OV2640 and streams them to the PC over **UDP** (port 1884).
-- **Core 1** receives `MOV:x,DIR:y` commands over TCP (port 1883) and drives the motors.
+**ESP32:**
 
-**On the PC (`server/unified_python_server.py`), three threads:**
-- **Receive** — reads UDP video packets and reassembles each JPEG frame, keeping only the most recent one.
-- **Processing** — runs the vision pipeline (grayscale, threshold, morphology, contours), finds the line's centre, computes steering, and runs the follow/recovery state machine.
-- **Main** — reads the gamepad and sends commands to the car.
+- Core 0 sends JPEG camera frames to the PC over UDP port `1884`.
+- Core 1 receives motor commands over UDP port `1883`.
+- TCP port `1883` remains available only in Access Point configuration mode for receiving WiFi credentials.
 
-**Why UDP for video:** with live video you want the *freshest* frame, not a backed-up queue of old ones. TCP resends lost packets and everything waits; UDP drops a lost frame and moves on. A JPEG frame is reassembled from packets using its start/end markers (`FF D8` / `FF D9`).
+**PC (`server/unified_python_server - UDP.py`):**
 
-A heartbeat keeps the link alive: if commands go silent for 1 s the motors stop, for 5 s the connection is dropped and reopened. If WiFi is lost for 10 s the chip restarts.
+- The discovery thread receives `HELLO:1` and learns the ESP32 address from the UDP packet source.
+- The video thread receives and decodes camera frames.
+- The processing thread calculates autonomous movement and steering.
+- The main loop sends the complete current control state every `50 ms`.
+
+The ESP32 announces itself every second with `HELLO:1`.
+
+The PC responds with `CMD:1,<session>,<sequence>,<move>,<direction>`.
+
+Only strictly valid and current packets from the IP configured in `DESTINO_IP` are applied. Duplicate, old, malformed, oversized, and wrong-version packets are rejected.
+
+If no valid command arrives for `500 ms`, the ESP32 stops the motors. Losing WiFi also stops them immediately.
+
+Source-IP filtering is not cryptographic authentication. The control channel is intended for a trusted local network.
+
+**Video limitation:** a complete JPEG is still sent as one UDP datagram. Large frames may be fragmented by IP, so application-level video fragmentation remains separate work.
 
 ## Line following
 
@@ -83,24 +95,44 @@ A small **state machine** handles losing the line: normal follow, and a recovery
 
 ## How to use
 
-**Firmware**
-1. Install the ESP32 board package in Arduino IDE (Boards Manager → "esp32" by Espressif). Board: **AI Thinker ESP32-CAM**.
-2. Open `firmware/main/main.ino`. Edit `config.h` and set your PC IP and AP credentials.
-3. Upload to the ESP32.
+### Firmware
 
-**PC server**
-1. Run `python server/unified_python_server.py` (needs opencv-python, numpy, pygame).
-2. Power the car. It connects automatically.
-3. Press the gamepad button to toggle between manual and line-following modes.
+1. Install the Espressif ESP32 board package.
+2. Select **AI Thinker ESP32-CAM**.
+3. Edit `firmware/main/config.h`.
+4. Set `DESTINO_IP` to the PC's private LAN address.
+5. Configure the Access Point credentials.
+6. Compile and upload the firmware.
 
-**Network**
-- **Same network (local):** set `DESTINO_IP` in `config.h` to the PC's private IP (`192.168.x.x`). Lowest latency.
-- **Over the internet:** forward ports **1883** (TCP) and **1884** (UDP) on the router to the PC, and set `DESTINO_IP` to the router's public IP.
-  - Note: if the car and PC are on the *same* network but you use the public IP, many routers won't route it back inside (no NAT loopback). Use the private IP in that case.
+Command-line compilation uses `arduino-cli compile --fqbn esp32:esp32:esp32cam firmware/main`.
+
+`DESTINO_IP` is machine-specific and may change. Do not commit a personal local IP as the project default.
+
+### PC server
+
+Create and activate a Python virtual environment, then install `numpy`, `opencv-python`, and `pygame`.
+
+Start the server with `python "server/unified_python_server - UDP.py"`.
+
+Power the car after starting the server. The ESP32 sends `HELLO:1`, the PC discovers its address, and UDP control begins automatically.
+
+Use the configured gamepad button to toggle between manual and autonomous line-following modes.
+
+### Network
+
+The PC and ESP32 must be connected to the same trusted local network.
+
+- UDP port `1883` carries discovery and motor-control messages.
+- UDP port `1884` carries camera video.
+- TCP port `1883` is used only while the ESP32 is in Access Point configuration mode.
+
+With default WSL2 NAT networking, the ESP32 normally cannot directly reach a server running only inside WSL. For the first physical test, run the Python server natively on Windows and set `DESTINO_IP` to the Windows WiFi address.
+
+Do not expose the UDP control ports directly to the Internet. Source-IP filtering is not strong authentication.
 
 ## Tuning (important — read this)
 
-The line follower is **not plug-and-play**. The parameters at the top of `unified_python_server.py` must be adjusted to **your** floor, tape, lighting, and car. Key ones:
+The line follower is **not plug-and-play**. The parameters in `server/unified_python_server - UDP.py` must be adjusted to **your** floor, tape, lighting, and car. Key ones:
 
 - **Tape and floor contrast.** The line must stand out from the floor in brightness. Dark tape on a light floor works; matte tape and a non-reflective floor avoid the light-reflection problems that plagued early tests (reflections read as near-white and confuse detection).
 - **Threshold / block size.** Adjust so the processed view shows a clean solid line, no floor patches, no holes.
@@ -111,15 +143,20 @@ The line follower is **not plug-and-play**. The parameters at the top of `unifie
 
 ## Known limitations
 
-- **Turning radius.** The car is differential-drive with shared direction pins (both L293Ds share IN pins), so it can't pivot in place. Sharp curves can exceed its turning ability; the recovery state (reversing) helps but doesn't fully solve very tight turns.
-- **WiFi range.** The ESP32-CAM's on-board antenna is weak. Far from the router the link degrades. An external antenna (via the u.FL connector, if present) helps a lot.
-- **Power.** Camera + WiFi draw current spikes; an undersized regulator can brown out and reset the chip. A large capacitor across the 5 V input helps.
+- **UDP video framing.** A JPEG is currently sent as one large UDP datagram. IP fragmentation makes large frames fragile; application-level fragmentation still needs to be implemented.
+- **No cryptographic control authentication.** Commands are restricted to `DESTINO_IP`, but source-IP filtering alone does not protect against a capable attacker on the local network.
+- **Turning radius.** The car uses differential drive with shared direction pins, so it cannot pivot in place.
+- **WiFi range.** The ESP32-CAM's on-board antenna is weak. An external antenna can improve its range.
+- **Power.** Camera and WiFi activity cause current spikes. An undersized regulator can brown out and reset the ESP32.
 
 ## Repository layout
 
-```
-firmware/main/   ESP32 firmware (main.ino) + config.h
-server/          unified_python_server.py (video + control + line following)
-hardware/        3D chassis (STL to print, F3D source)
-docs/            photos, thumbnails
+```text
+firmware/main/                   ESP32 firmware and UDP protocol parser
+server/control_protocol.py      Python UDP protocol encoder
+server/unified_python_server - UDP.py
+                                Video, control and line-following server
+tests/                          Python and host-side C++ tests
+hardware/                       3D chassis files
+docs/                           Photos and documentation
 ```
