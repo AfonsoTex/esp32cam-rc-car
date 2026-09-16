@@ -83,6 +83,8 @@ const char *destino = DESTINO_IP;
 // IP picks the machine, port picks which program on it.
 #define SERVER_PORT 1883
 #define VIDEO_PORT 1884
+#define CONTROL_PROTOCOL_VERSION 1
+#define HELLO_INTERVAL_MS 1000UL
 
 // Last time any data arrived from the PC. Silence for >1 s stops the
 // motors; >5 s drops the TCP connection.
@@ -90,6 +92,7 @@ unsigned long lastHeartbeat = 0;
 unsigned long wifiLostTimestamp = 0;
 bool trackingLostWifi = false;
 unsigned long lastReconnectAttempt = 0;
+unsigned long lastHelloSent = 0;
 
 // TCP server, used ONLY in Access Point mode (initial WiFi setup).
 // With no known network, the ESP32 becomes the AP "ESP32_CAM_AFONSO".
@@ -102,6 +105,7 @@ WiFiClient client;         // commands from comandos.py, port 1883
 //WiFiClient clienteVideo;   // JPEG frames to camara.py, port 1884
 
 // Declares the UDP object responsible for managing the video streaming channel
+WiFiUDP udpControl;
 WiFiUDP udpVideo;
 
 // clock frequency, pixel format, frame size, number of frame buffers.
@@ -385,6 +389,24 @@ void processar_comando(char* data) {
     }
 }
 
+void send_control_hello_if_due() {
+    unsigned long now = millis();
+
+    // Unsigned subtraction remains valid when millis() wraps around.
+    if (lastHelloSent != 0 && now - lastHelloSent < HELLO_INTERVAL_MS) {
+        return;
+    }
+    lastHelloSent = now;
+
+    if (udpControl.beginPacket(destino, SERVER_PORT) == 0) {
+        return;
+    }
+
+    udpControl.print("HELLO:");
+    udpControl.print(CONTROL_PROTOCOL_VERSION);
+    udpControl.endPacket();
+}
+
 void setup() {
     Serial.begin(115200);
     pinos_setup();          // motor direction pins
@@ -503,6 +525,14 @@ void setup() {
             loop_config_mode();
         }
 
+        // Bind the UDP control channel after normal WiFi connection.
+        // AP configuration mode returns earlier and keeps its TCP server unchanged.
+        if (udpControl.begin(SERVER_PORT)) {
+            Serial.printf("[CONTROL] UDP listening on port %d\n", SERVER_PORT);
+        } else {
+            Serial.println("[CONTROL] Failed to open UDP control port");
+        }
+
         // WiFi is up: launch the camera streaming task pinned to Core 0,
         // so heavy JPEG sending never blocks the motor commands on Core 1.
         xTaskCreatePinnedToCore(
@@ -535,6 +565,9 @@ void loop() {
         return;
     }
     trackingLostWifi = false;
+
+    // Advertise this ESP32 even while the legacy TCP link is disconnected.
+    send_control_hello_if_due();
 
     // Layer 2 — is the TCP link to the PC up?
     // If down: stop the motors and retry connect once every 5 s (connect
