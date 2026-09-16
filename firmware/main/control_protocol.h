@@ -7,6 +7,7 @@
 
 constexpr uint32_t CONTROL_PROTOCOL_VERSION = 1;
 constexpr size_t CONTROL_PACKET_MAX_SIZE = 64;
+constexpr size_t CONTROL_RETIRED_SESSION_CAPACITY = 4;
 
 struct ControlCommand {
     uint32_t session;
@@ -32,6 +33,9 @@ struct ControlSequenceState {
     bool initialized = false;
     uint32_t session = 0;
     uint32_t last_sequence = 0;
+    uint32_t retired_sessions[CONTROL_RETIRED_SESSION_CAPACITY]{};
+    size_t retired_count = 0;
+    size_t retired_next = 0;
 };
 
 namespace control_protocol_detail {
@@ -199,17 +203,39 @@ inline bool accept_control_sequence(
     const ControlCommand &command,
     ControlSequenceState &state
 ) {
-    if (!state.initialized || command.session != state.session) {
+    if (!state.initialized) {
         state.initialized = true;
         state.session = command.session;
         state.last_sequence = command.sequence;
         return true;
     }
 
-    if (command.sequence <= state.last_sequence) {
-        return false;
+    if (command.session == state.session) {
+        if (command.sequence <= state.last_sequence) {
+            return false;
+        }
+
+        state.last_sequence = command.sequence;
+        return true;
     }
 
+    for (size_t index = 0; index < state.retired_count; ++index) {
+        if (command.session == state.retired_sessions[index]) {
+            return false;
+        }
+    }
+
+    if (state.retired_count < CONTROL_RETIRED_SESSION_CAPACITY) {
+        state.retired_sessions[state.retired_count] = state.session;
+        ++state.retired_count;
+    } else {
+        state.retired_sessions[state.retired_next] = state.session;
+        state.retired_next = (
+            state.retired_next + 1
+        ) % CONTROL_RETIRED_SESSION_CAPACITY;
+    }
+
+    state.session = command.session;
     state.last_sequence = command.sequence;
     return true;
 }

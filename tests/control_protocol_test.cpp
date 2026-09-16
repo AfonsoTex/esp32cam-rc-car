@@ -107,6 +107,15 @@ int main() {
     assert(accept_control_sequence(new_session, state));
     assert(!accept_control_sequence(new_session, state));
 
+    ControlCommand delayed_old_session{100U, 12U, 0.0F, 0.0F};
+    assert(!accept_control_sequence(delayed_old_session, state));
+
+    ControlCommand third_session{300U, 5U, 0.0F, 0.0F};
+    assert(accept_control_sequence(third_session, state));
+
+    ControlCommand delayed_second_session{200U, 1U, 0.0F, 0.0F};
+    assert(!accept_control_sequence(delayed_second_session, state));
+
     puts("Firmware control protocol tests passed.");
     return 0;
 }
