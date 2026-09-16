@@ -95,6 +95,8 @@ unsigned long lastReconnectAttempt = 0;
 unsigned long lastHelloSent = 0;
 ControlSequenceState udpControlSequenceState;
 unsigned long lastUdpShadowLog = 0;
+IPAddress controlPeerIp;
+bool controlPeerIpValid = false;
 
 // TCP server, used ONLY in Access Point mode (initial WiFi setup).
 // With no known network, the ESP32 becomes the AP "ESP32_CAM_AFONSO".
@@ -413,6 +415,13 @@ void process_udp_control_packets_shadow() {
     int packet_size = 0;
 
     while ((packet_size = udpControl.parsePacket()) > 0) {
+        if (!controlPeerIpValid || udpControl.remoteIP() != controlPeerIp) {
+            while (udpControl.available() > 0) {
+                udpControl.read();
+            }
+            continue;
+        }
+
         if (packet_size > static_cast<int>(CONTROL_PACKET_MAX_SIZE)) {
             while (udpControl.available() > 0) {
                 udpControl.read();
@@ -581,6 +590,11 @@ void setup() {
             Serial.println("All networks failed. Fallback mode.");
             enable_access_point();
             loop_config_mode();
+        }
+
+        controlPeerIpValid = controlPeerIp.fromString(destino);
+        if (!controlPeerIpValid) {
+            Serial.println("[CONTROL] DESTINO_IP is not a valid IPv4 address");
         }
 
         // Bind the UDP control channel after normal WiFi connection.
