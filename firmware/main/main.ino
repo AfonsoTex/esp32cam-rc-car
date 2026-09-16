@@ -80,24 +80,20 @@ char buffer[128];
 // Set this in config.h — it changes with your network.
 const char *destino = DESTINO_IP;
 
-// Port where comandos.py listens. Video uses 1884 (see camara.py).
-// IP picks the machine, port picks which program on it.
-#define SERVER_PORT 1883
+// UDP control and video ports on the normal WiFi connection.
+// The AP configuration TCP server remains separate below.
+#define CONTROL_PORT 1883
 #define VIDEO_PORT 1884
 #define HELLO_INTERVAL_MS 1000UL
 #define CONTROL_WATCHDOG_MS 500UL
 
-// Last data received on the temporary legacy TCP channel.
-// Motor safety is owned exclusively by the UDP watchdog.
-unsigned long lastHeartbeat = 0;
 unsigned long wifiLostTimestamp = 0;
 bool trackingLostWifi = false;
-unsigned long lastReconnectAttempt = 0;
 unsigned long lastHelloSent = 0;
 ControlSequenceState udpControlSequenceState;
 unsigned long lastUdpControlLog = 0;
 unsigned long lastValidUdpCommand = 0;
-bool udpCommandApplied = false;
+volatile bool udpCommandApplied = false;
 float lastAppliedUdpMove = 0.0F;
 float lastAppliedUdpDirection = 0.0F;
 IPAddress controlPeerIp;
@@ -109,11 +105,7 @@ bool controlPeerIpValid = false;
 // store a new network in NVS flash.
 WiFiServer ESPserver(1883);
 
-// Normal mode: the ESP32 is the client on both connections.
-WiFiClient client;         // commands from comandos.py, port 1883
-//WiFiClient clienteVideo;   // JPEG frames to camara.py, port 1884
-
-// Declares the UDP object responsible for managing the video streaming channel
+// Normal mode uses separate UDP sockets for control and video.
 WiFiUDP udpControl;
 WiFiUDP udpVideo;
 
@@ -343,9 +335,9 @@ void task_camara(void *parameter) {
     udpVideo.begin(VIDEO_PORT);
 
     while (true) {
-        // GOLDEN RULE: Only stream video if the control TCP connection is active.
-        // This prevents UDP from flooding the network and blocking the TCP handshake.
-        if (!client.connected()) {
+        // Stream video only while valid UDP control commands are recent.
+        // The watchdog clears this flag when control traffic stops.
+        if (!udpCommandApplied) {
             vTaskDelay(100 / portTICK_PERIOD_MS);
             continue;
         }
@@ -373,31 +365,6 @@ void task_camara(void *parameter) {
     }
 }
 
-void processar_comando(char* data) {
-    Serial.print("Command received to process: ");
-    Serial.println(data);
-
-    // Parses a "MOV:x,DIR:y" line and drives the motors with x and y.
-    // data+4 skips "MOV:"; strchr finds the comma; writing '\0' over the
-    // comma splits the string so mov holds only x. virgula+5 skips ",DIR:".
-    // atof turns each number text into a float.
-
-    char *mov = data + 4;
-    char *virgula = strchr(mov, ',');
-
-    float move = 0.0;
-    float direc = 0.0;
-
-    if (virgula != NULL) {
-        *virgula = '\0';
-        char *dir_str = virgula + 5;   // assumes fixed ",DIR:" prefix
-
-        move  = atof(mov);
-        direc = atof(dir_str);
-        motor_logic(move, direc);
-    }
-}
-
 void send_control_hello_if_due() {
     unsigned long now = millis();
 
@@ -407,7 +374,7 @@ void send_control_hello_if_due() {
     }
     lastHelloSent = now;
 
-    if (udpControl.beginPacket(destino, SERVER_PORT) == 0) {
+    if (udpControl.beginPacket(destino, CONTROL_PORT) == 0) {
         return;
     }
 
@@ -630,8 +597,8 @@ void setup() {
 
         // Bind the UDP control channel after normal WiFi connection.
         // AP configuration mode returns earlier and keeps its TCP server unchanged.
-        if (udpControl.begin(SERVER_PORT)) {
-            Serial.printf("[CONTROL] UDP listening on port %d\n", SERVER_PORT);
+        if (udpControl.begin(CONTROL_PORT)) {
+            Serial.printf("[CONTROL] UDP listening on port %d\n", CONTROL_PORT);
         } else {
             Serial.println("[CONTROL] Failed to open UDP control port");
         }
@@ -659,6 +626,7 @@ void loop() {
     // ESP.restart(). The return blocks everything else — no WiFi, nothing to
     // do. If connected, clear the flag so the next outage is timed fresh.
     if (WiFi.status() != WL_CONNECTED) {
+        udpCommandApplied = false;
         stop_motors();
         if (!trackingLostWifi) {
             wifiLostTimestamp = millis();
@@ -669,44 +637,10 @@ void loop() {
     }
     trackingLostWifi = false;
 
-    // Advertise this ESP32 even while the legacy TCP link is disconnected.
+    // Advertise this ESP32 and process all pending UDP control packets.
     send_control_hello_if_due();
     process_udp_control_packets();
     enforce_udp_control_watchdog();
+    delay(1);
 
-    // Layer 2 - maintain the temporary legacy TCP link during migration.
-    // It is still used for Python synchronization and video gating,
-    // but it no longer owns motor commands or motor safety.
-    if (!client.connected()) {
-        if (millis() - lastReconnectAttempt > 5000) {
-            lastReconnectAttempt = millis();
-            Serial.printf("[%lu] Trying to reach the PC...\n", millis());
-            if (client.connect(destino, SERVER_PORT)) {
-                Serial.printf("[%lu] Connected successfully!\n", millis());
-                lastHeartbeat = millis();
-            } else {
-                lastHeartbeat = millis();
-                Serial.printf("[%lu] CONNECTION FAILED!\n", millis());
-            }
-        }
-        return;
-    }
-
-    // Layer 3 - legacy TCP liveness only; UDP owns motor safety.
-    if (millis() - lastHeartbeat > 5000) {
-        Serial.printf("[%lu] HEARTBEAT TIMEOUT - closing!\n", millis());
-        client.stop();                    // 5 s: assume dead, drop the socket
-        lastReconnectAttempt = millis();
-    }
-
-    // Layer 4 - drain legacy TCP data only to track connection liveness.
-    if (client.available() > 0) {
-        while (client.available() > 0) {
-            memset(buffer, 0, sizeof(buffer));
-            client.readBytesUntil('\n', buffer, sizeof(buffer) - 1);
-            lastHeartbeat = millis();
-        }
-
-        // Legacy TCP payloads are drained but never applied to motors.
-    }
 }
