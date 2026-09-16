@@ -1,4 +1,5 @@
 #include "config.h"
+#include "control_protocol.h"
 #include <WiFiUdp.h>
 #include <stdio.h>        // printf / sprintf
 #include "nvs_flash.h"    // NVS partition init (non-volatile storage in flash)
@@ -83,7 +84,6 @@ const char *destino = DESTINO_IP;
 // IP picks the machine, port picks which program on it.
 #define SERVER_PORT 1883
 #define VIDEO_PORT 1884
-#define CONTROL_PROTOCOL_VERSION 1
 #define HELLO_INTERVAL_MS 1000UL
 
 // Last time any data arrived from the PC. Silence for >1 s stops the
