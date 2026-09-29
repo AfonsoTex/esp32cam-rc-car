@@ -2,6 +2,10 @@
 
 A remote-controlled car built on the AI-Thinker ESP32-CAM: live video streaming and gamepad control over WiFi, plus an autonomous line-following mode driven by computer vision on the PC.
 
+This repository contains the ESP32-CAM car, its PC server, and the chassis files.
+Video, driving commands, discovery, and heartbeats use UDP. TCP is only used
+to configure WiFi credentials in Access Point mode.
+
 <div align="center"><img src="docs/assembled.jpeg" width="500"></div>
 
 ## What it does
@@ -11,7 +15,7 @@ The car has two modes, toggled with the gamepad:
 - **Manual** — drive it with an Xbox controller over WiFi.
 - **Autonomous line following** — the PC analyses the camera stream, finds a line on the floor, and steers the car along it on its own.
 
-On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans the air. It connects to the strongest known one. If no stored network is in range, it falls back to **Access Point mode**: it creates its own network (name set in `config.h`), and you send it credentials with a TCP tool like Packet Sender (`WIFI:ssid,password`). It saves them to flash and restarts.
+On boot, the ESP32 reads the WiFi networks stored in its flash (NVS) and scans for a saved network it can connect to. If none is available, it falls back to **Access Point mode**: it creates its own network (name set in `config.h`). Connect to that network and use a TCP tool like Packet Sender to send `WIFI:ssid,password` followed by a newline to `192.168.4.1:1883`. After saving the credentials, send `RESET:NOW` followed by a newline to restart.
 
 ## Architecture
 
@@ -21,7 +25,7 @@ The ESP32 stays "dumb" on purpose: it captures and sends frames, receives comman
 - **Core 0** captures JPEG frames from the OV2640 and streams them to the PC over **UDP** (port 1884).
 - **Core 1** receives `MOV:x,DIR:y` commands over **UDP** (port 1883) and drives the motors.
 
-**On the PC (`server/unified_python_server.py`), three threads:**
+**On the PC (`server/unified_python_server - UDP.py`), three threads:**
 - **Receive** — reads UDP video packets and reassembles each JPEG frame, keeping only the most recent one.
 - **Processing** — runs the vision pipeline (grayscale, threshold, morphology, contours), finds the line's centre, computes steering, and runs the follow/recovery state machine.
 - **Main** — reads the gamepad and sends commands to the car.
@@ -89,9 +93,9 @@ A small **state machine** handles losing the line: normal follow, and a recovery
 3. Upload to the ESP32.
 
 **PC server**
-1. Run `python server/unified_python_server.py` (needs opencv-python, numpy, pygame).
+1. Install the dependencies with `python -m pip install opencv-python numpy pygame`, then run `python "server/unified_python_server - UDP.py"` from the repository root.
 2. Power the car. It connects automatically.
-3. Press the gamepad button to toggle between manual and line-following modes.
+3. Press gamepad button 0 (A on the Xbox controller) to toggle between manual and line-following modes.
 
 **Network**
 - **Same network (local):** set `DESTINO_IP` in `config.h` to the PC's private IP (`192.168.x.x`). Lowest latency.
@@ -100,7 +104,7 @@ A small **state machine** handles losing the line: normal follow, and a recovery
 
 ## Tuning (important — read this)
 
-The line follower is **not plug-and-play**. The parameters at the top of `unified_python_server.py` must be adjusted to **your** floor, tape, lighting, and car. Key ones:
+The line follower is **not plug-and-play**. The parameters at the top of `server/unified_python_server - UDP.py` must be adjusted to **your** floor, tape, lighting, and car. Key ones:
 
 - **Tape and floor contrast.** The line must stand out from the floor in brightness. Dark tape on a light floor works; matte tape and a non-reflective floor avoid the light-reflection problems that plagued early tests (reflections read as near-white and confuse detection).
 - **Threshold / block size.** Adjust so the processed view shows a clean solid line, no floor patches, no holes.
@@ -119,7 +123,7 @@ The line follower is **not plug-and-play**. The parameters at the top of `unifie
 
 ```
 firmware/main/   ESP32 firmware (main.ino) + config.h
-server/          unified_python_server.py (video + control + line following)
+server/          unified_python_server - UDP.py (video + control + line following)
 hardware/        3D chassis (STL to print, F3D source)
 docs/            photos, thumbnails
 ```
